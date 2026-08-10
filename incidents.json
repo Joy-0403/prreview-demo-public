@@ -1,0 +1,10 @@
+{
+  "incidents": [
+    {"category": "outage",      "title": "Checkout unavailable in eu-west-1", "affected_users": 18000,
+     "body": "Health checks failed for 11 minutes. Customers saw a 503 on the payment step."},
+    {"category": "degradation", "title": "Search results slow", "affected_users": 900,
+     "body": "p95 latency went from 240ms to 3.1s after the index rebuild."},
+    {"category": "cosmetic",    "title": "Footer link misaligned on mobile", "affected_users": 40000,
+     "body": "The privacy link wraps onto its own line below 360px."}
+  ]
+}
