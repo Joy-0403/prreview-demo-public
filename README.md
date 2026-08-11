@@ -21,6 +21,7 @@ digest/severity.py         the one severity ladder (weight + affected users)
         └─ digest/render.py       reads the ladder rather than restating it
 
 digest/summarize.py        the per-incident prompt, sent once per record
+digest/llm.py              the Bedrock call: which model, which region
 digest/cli.py              wires the four together
 ```
 
@@ -36,6 +37,9 @@ and none of them are visible in a diff that touches only one side:
   siren without anyone editing `render.py`.
 - **`summarize.PREAMBLE` and the size of a batch.** It is sent with every
   incident, so a sentence added there is paid once per record, on every run.
+- **`llm.MODEL_ID` and what a request costs.** The model is named in one
+  place and the region in the same one, so a change to either moves the
+  price of every incident in every digest.
 - **The tests and the current behaviour.** `test_severity` pins the two cases
   the ladder exists to get right: high weight with nobody affected, and a
   trivial category affecting everybody.

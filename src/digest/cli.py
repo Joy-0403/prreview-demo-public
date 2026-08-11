@@ -9,11 +9,11 @@ import json
 import sys
 from pathlib import Path
 
-from . import categories, render, severity, summarize
+from . import categories, llm, render, severity, summarize
 
 
 def _offline(prompt: str) -> str:
-    """Stand-in for a model call, so the demo runs with no credentials."""
+    """Stand-in for a model call, so the digest renders with no credentials."""
     for line in prompt.splitlines():
         if line.startswith("Title: "):
             return line[len("Title: "):]
@@ -37,7 +37,10 @@ def main(argv: list[str] | None = None) -> int:
         print(__doc__.strip(), file=sys.stderr)
         return 2
     raw = json.loads(Path(args[0]).read_text(encoding="utf-8"))
-    print(render.digest([enrich(r) for r in raw["incidents"]]))
+    # Offline unless asked for the real thing, so `python -m digest.cli` works
+    # on a laptop with no AWS set up.
+    call = llm.call if "--live" in args else _offline
+    print(render.digest([enrich(r, call=call) for r in raw["incidents"]]))
     return 0
 
 
