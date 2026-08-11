@@ -1,11 +1,36 @@
 {
   "_comment": "Controlled vocabulary. digest.categories validates against it and the Dockerfile bakes a copy into the image, so a change here needs both to follow.",
-  "version": 3,
+  "version": 4,
   "categories": [
-    {"key": "outage",      "label": "Outage",              "weight": 5},
-    {"key": "degradation", "label": "Degraded service",    "weight": 3},
-    {"key": "security",    "label": "Security",            "weight": 5},
-    {"key": "data",        "label": "Data correctness",    "weight": 4},
-    {"key": "cosmetic",    "label": "Cosmetic",            "weight": 1}
+    {
+      "key": "outage",
+      "label": "Outage",
+      "weight": 5
+    },
+    {
+      "key": "degradation",
+      "label": "Degraded service",
+      "weight": 3
+    },
+    {
+      "key": "performance",
+      "label": "Performance",
+      "weight": 2
+    },
+    {
+      "key": "security",
+      "label": "Security",
+      "weight": 5
+    },
+    {
+      "key": "data",
+      "label": "Data correctness",
+      "weight": 4
+    },
+    {
+      "key": "cosmetic",
+      "label": "Cosmetic",
+      "weight": 1
+    }
   ]
 }

@@ -11,6 +11,8 @@ PREAMBLE = """\
 Summarise the incident in one sentence for an on-call engineer.
 State what broke and who noticed. Do not speculate about the cause.
 Do not repeat the severity or the category; the digest prints those already.
+If the incident names a region, say which one, because on-call rotates by
+region and the first question is always whether it is theirs.
 """
 
 
