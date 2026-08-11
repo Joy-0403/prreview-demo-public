@@ -14,7 +14,7 @@ import os
 # default here rather than scattered across call sites: a model id in three
 # places is three things to update and two of them will be missed.
 AWS_REGION = os.environ.get("AWS_REGION", "ca-central-1")
-MODEL_ID = os.environ.get("DIGEST_MODEL", "meta.llama3-8b-instruct-v1:0")
+MODEL_ID = os.environ.get("DIGEST_MODEL", "mistral.mistral-7b-instruct-v0:2")
 
 # Summaries are one sentence. Asking for more than that costs output tokens on
 # every incident and gets truncated by the renderer anyway.

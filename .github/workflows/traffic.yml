@@ -1,0 +1,74 @@
+# Synthetic Bedrock traffic, so the cost monitor has a history to watch.
+#
+# CloudWatch metrics under AWS/Bedrock are written by AWS and cannot be
+# backfilled, so a week of history costs a week of waiting. This runs daily to
+# accumulate it, at roughly a cent a month -- see tools/traffic.py for the
+# arithmetic, which is stated there rather than described as "cheap".
+#
+# Most days are ordinary on purpose. The monitor judges a day against the
+# median of the days around it, so making every day anomalous would move the
+# baseline onto the anomaly and detect nothing.
+#
+# Credentials come from OIDC rather than a stored key, so there is no
+# long-lived secret in this repository. Without the role configured the job
+# says so once and stops: a scheduled job that fails every morning trains
+# everyone to ignore the red mark, which is worse than not having it.
+
+name: demo traffic
+
+on:
+  schedule:
+    # 11:00 UTC, an hour before the cost workflow at 12:00, so the day's calls
+    # exist before anything reads them.
+    - cron: "0 11 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Force a kind of day (auto follows the date)"
+        required: false
+        default: auto
+        type: choice
+        options: [auto, normal, balloon, collapse]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check for an AWS role
+        id: creds
+        env:
+          ROLE: ${{ secrets.DEMO_AWS_ROLE_ARN }}
+        run: |
+          if [ -z "$ROLE" ]; then
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No DEMO_AWS_ROLE_ARN secret, so there is no way to"\
+              "call Bedrock. Add an OIDC role to turn this on, or disable this"\
+              "workflow -- it cannot do anything without one."
+          else
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Assume the role
+        if: steps.creds.outputs.have == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEMO_AWS_ROLE_ARN }}
+          aws-region: ca-central-1
+
+      - name: Install boto3
+        if: steps.creds.outputs.have == 'true'
+        run: pip install --quiet boto3
+
+      - name: Send the day's calls
+        if: steps.creds.outputs.have == 'true'
+        run: python tools/traffic.py --mode "${{ inputs.mode || 'auto' }}"

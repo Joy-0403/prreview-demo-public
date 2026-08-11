@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Daily synthetic traffic, scheduled by launchd.
+
+  Install:
+      sed "s#REPO_PATH#$PWD#g" tools/com.prreview.demo-traffic.plist \
+        > ~/Library/LaunchAgents/com.prreview.demo-traffic.plist
+      launchctl load ~/Library/LaunchAgents/com.prreview.demo-traffic.plist
+
+  Check it is registered:
+      launchctl list | grep demo-traffic
+
+  Run it now rather than waiting for the hour:
+      launchctl start com.prreview.demo-traffic
+
+  Remove:
+      launchctl unload ~/Library/LaunchAgents/com.prreview.demo-traffic.plist
+
+  StartCalendarInterval rather than StartInterval: launchd fires a missed
+  calendar job once when the machine wakes, so a laptop that was shut at 07:00
+  still sends that day's calls. StartInterval would simply drift.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.prreview.demo-traffic</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>REPO_PATH/tools/run-daily.sh</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>7</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>REPO_PATH</string>
+
+  <!-- launchd starts with a minimal PATH, and the script needs the aws CLI. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>REPO_PATH/.prreview/cache/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>REPO_PATH/.prreview/cache/launchd.err</string>
+</dict>
+</plist>
