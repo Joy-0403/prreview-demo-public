@@ -16,6 +16,12 @@ region and the first question is always whether it is theirs.
 """
 
 
+# Short incidents are usually self-describing -- the body restates the title
+# and the model hands back something close to what it was given. Skipping the
+# call on those is straightforward money saved on a nightly run.
+MIN_BODY_CHARS = 80
+
+
 def build_prompt(title: str, body: str) -> str:
     return f"{PREAMBLE}\nTitle: {title}\n\n{body.strip()}\n"
 
@@ -23,4 +29,7 @@ def build_prompt(title: str, body: str) -> str:
 def summarise(title: str, body: str, *, call) -> str:
     """`call` takes a prompt and returns text. Injected so the digest can be
     rendered in tests and offline without a model."""
+    body = body.strip()
+    if len(body) < MIN_BODY_CHARS:
+        return title
     return call(build_prompt(title, body)).strip().splitlines()[0]
