@@ -45,9 +45,12 @@ import random
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from digest import llm, summarize  # noqa: E402
+try:
+    # Inside Lambda the package sits beside this file at the root of the zip.
+    from digest import llm, summarize
+except ImportError:  # a checkout, where it is under src/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from digest import llm, summarize
 
 # Twelve is enough that one outlier call cannot move the day's average, and
 # few enough that the whole exercise stays under a cent a month.
@@ -169,6 +172,43 @@ def main(argv: list[str] | None = None) -> int:
     # Non-zero when nothing got through, so a scheduled run that has quietly
     # stopped working shows up as a failure rather than as a silent gap.
     return 0 if sent else 1
+
+
+def handler(event=None, context=None) -> dict:
+    """One scheduled batch, run from Lambda.
+
+    The mode comes from the EventBridge event rather than from the date. Two
+    rules point here -- one for most days and one for the day that is
+    deliberately wrong -- because a schedule that says which day is which is
+    readable in the console, whereas a date arithmetic buried in this file is
+    not, and somebody looking at an alert needs to be able to check whether it
+    was the planted one.
+    """
+    mode = (event or {}).get("mode", "auto")
+    if mode == "auto":
+        mode = plan_for(dt.datetime.now(dt.timezone.utc).date())
+
+    rng = random.Random(dt.datetime.now(dt.timezone.utc).date().toordinal())
+    picks = [rng.choice(INCIDENTS) for _ in range(CALLS_PER_DAY)]
+
+    sent = 0
+    errors: list[str] = []
+    for title, body in picks:
+        try:
+            llm.call(prompt_for(mode, title, body))
+            sent += 1
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{type(e).__name__}: {e}")
+            if len(errors) >= 3:
+                break
+
+    if not sent:
+        # Raise rather than return quietly. A traffic generator that has
+        # silently stopped leaves the monitor watching a flat line and
+        # reporting that nothing is wrong, which is the same failure the
+        # monitor itself is built to avoid.
+        raise RuntimeError(f"no calls got through: {errors}")
+    return {"mode": mode, "sent": sent, "failed": len(errors)}
 
 
 if __name__ == "__main__":

@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# The synthetic traffic, on a schedule that owns itself.
+#
+# It ran on a laptop first, and that was inconsistent: the monitor was moved
+# into AWS precisely so a silent week could not mean "the laptop was shut", and
+# then the thing it watches was left depending on somebody remembering to run a
+# command. A gap in the traffic and a gap in the monitoring look identical from
+# the outside, so both halves have to be equally unattended or neither is.
+#
+# Two rules rather than one. Most days send an ordinary batch; Thursday sends a
+# deliberately wrong one. Which day is which is visible in the console, where
+# somebody looking at an alert can check whether it was the planted one --
+# arithmetic on the date buried in traffic.py could not be checked that way.
+#
+# Deliberately most days ordinary: the monitor compares a day against the
+# median of its neighbours, so making every day anomalous would move the
+# baseline onto the anomaly and detect nothing.
+#
+#   aws s3 cp traffic.zip s3://<bucket>/traffic.zip
+#   aws cloudformation deploy --stack-name prreview-demo-traffic \
+#     --template-file deploy/traffic.yaml --capabilities CAPABILITY_IAM \
+#     --parameter-overrides CodeS3Bucket=<bucket>
+
+Description: >-
+  Synthetic Bedrock traffic for the incident-digest demo, so the cost monitor
+  has real CloudWatch history to watch. About two cents a month. Deploy this in
+  the region the model is called in; Lambda sets AWS_REGION from the function
+  and a template may not override it.
+
+Parameters:
+  CodeS3Bucket:
+    Type: String
+  CodeS3Key:
+    Type: String
+    Default: traffic.zip
+
+  ModelId:
+    Type: String
+    Default: mistral.mistral-7b-instruct-v0:2
+    Description: >-
+      Chosen because nothing else in this account calls it. CloudWatch
+      aggregates per model per region, so sharing one with a real workload
+      would push synthetic traffic into that workload's monitoring and bury
+      this one's anomalies under its volume.
+
+  OrdinarySchedule:
+    Type: String
+    Default: "cron(0 18 ? * SUN,MON,TUE,WED,FRI,SAT *)"
+    Description: >-
+      18:00 UTC, comfortably inside the UTC day so the whole batch lands in one
+      bucket. A run near midnight UTC would split across two and halve both.
+
+  AnomalySchedule:
+    Type: String
+    Default: "cron(0 18 ? * THU *)"
+    Description: >-
+      Thursday, so the anomaly is in a closed UTC bucket by 17:00 on the North
+      American west coast and the monitor's 07:00 UTC run reports it that same
+      night.
+
+  AnomalyMode:
+    Type: String
+    Default: balloon
+    AllowedValues: [balloon, collapse]
+    Description: >-
+      `balloon` is something appended to every prompt -- retrieved context, a
+      longer template, a history window that stopped being trimmed. `collapse`
+      is the prompt builder returning early so the model gets a bare title:
+      nothing raises, output still arrives, and the bill goes down, which is
+      why a ceiling alarm never finds it.
+
+Resources:
+  TrafficRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-one-model
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Scoped to the single model. This is the only role in either
+              # stack that can spend money, so it is the one worth reading
+              # twice: it cannot invoke anything else, and it cannot read.
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${ModelId}"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+  TrafficFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.11
+      Handler: traffic.handler
+      Role: !GetAtt TrafficRole.Arn
+      # Twelve sequential calls to a 7B model. Generous, because a timeout
+      # partway through would leave a half-sized batch that reads as an anomaly
+      # rather than as a failure.
+      Timeout: 300
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      Environment:
+        Variables:
+          # AWS_REGION is reserved -- Lambda sets it to the function's own
+          # region and refuses to let a template override it. So the stack has
+          # to be deployed in the region Bedrock is called in, and there is no
+          # second place for that to be configured differently and drift.
+          DIGEST_MODEL: !Ref ModelId
+
+  TrafficLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${TrafficFunction}"
+      RetentionInDays: 14
+
+  OrdinaryDays:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: An ordinary batch, so the median has something to sit on
+      ScheduleExpression: !Ref OrdinarySchedule
+      State: ENABLED
+      Targets:
+        - Id: traffic
+          Arn: !GetAtt TrafficFunction.Arn
+          Input: '{"mode": "normal"}'
+
+  AnomalyDay:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: The deliberately wrong day the monitor is expected to catch
+      ScheduleExpression: !Ref AnomalySchedule
+      State: ENABLED
+      Targets:
+        - Id: traffic
+          Arn: !GetAtt TrafficFunction.Arn
+          Input: !Sub '{"mode": "${AnomalyMode}"}'
+
+  AllowOrdinary:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt TrafficFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt OrdinaryDays.Arn
+
+  AllowAnomaly:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt TrafficFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AnomalyDay.Arn
+
+Outputs:
+  FunctionName:
+    Value: !Ref TrafficFunction
+  SendNow:
+    Description: A batch on demand, without waiting for the schedule.
+    Value: !Sub >-
+      aws lambda invoke --function-name ${TrafficFunction}
+      --payload '{"mode":"balloon"}' --cli-binary-format raw-in-base64-out /dev/stdout
