@@ -18,7 +18,7 @@ def headline(incidents: list[dict]) -> str:
 
 def line(incident: dict) -> str:
     label = categories.label_of(incident["category"])
-    mark = "!" if severity.is_urgent(incident["severity"]) else " "
+    mark = "!" if severity.at_least(incident["severity"], ALERT_FLOOR) else " "
     return (
         f"{mark}[{incident['severity'].upper():>8}] {label} - {incident['summary']} "
         f"({incident['affected_users']} affected, {incident['region']})"

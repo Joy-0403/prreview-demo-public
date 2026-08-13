@@ -47,8 +47,3 @@ def at_least(name: str, floor: str) -> bool:
         return LADDER.index(name) >= LADDER.index(floor)
     except ValueError:
         return False
-
-
-def is_urgent(name: str) -> bool:
-    """Whether this rung wakes somebody up."""
-    return name in ("high", "critical")

@@ -26,7 +26,7 @@ def enrich(raw: dict, *, call=_offline) -> dict:
     return {
         "category": raw["category"],
         "affected_users": affected,
-        "region": raw["region"],
+        "region": raw.get("region", "unknown"),
         "severity": severity.severity(weight, affected),
         "summary": summarize.summarise(raw["title"], raw.get("body", ""), call=call),
     }
