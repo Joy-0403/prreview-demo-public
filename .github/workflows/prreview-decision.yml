@@ -1,0 +1,136 @@
+name: prreview
+
+# Two triggers, deliberately separate.
+#
+# `decision` fires when the viewer commits a reviewer's decision to the review
+# branch. It is purely mechanical -- read the marks, post the review comment,
+# enable auto-merge or not -- so it needs no model credentials at all and runs
+# on the built-in GITHUB_TOKEN.
+#
+# `rereview` fires when the author pushes fixes. It does call the model, so it
+# is the only job that needs cloud credentials, and it skips itself cleanly
+# when they are not configured (the author can run `prreview publish` locally
+# instead).
+
+on:
+  push:
+    branches: [reviews, 'review/**']
+    paths: ['**/decisions/**']
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  decision:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install prreview
+        run: pip install --quiet 'prreview @ git+https://github.com/${{ github.repository_owner }}/pr-review-automation-agent@main'
+
+      - name: Identify the pull request and round from the pushed decision files
+        id: target
+        run: |
+          set -euo pipefail
+          changed=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} \
+                    -- '**/decisions/**' 2>/dev/null || true)
+          if [ -z "$changed" ]; then
+            echo "no decision files in this push"; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # Layout is pr-<N>/round-<K>/decisions/... (single-branch) or
+          # round-<K>/decisions/... on a review/pr-<N> branch.
+          path=$(echo "$changed" | head -n1)
+          pr=$(echo "$path" | sed -n 's#^pr-\([0-9]\+\)/.*#\1#p')
+          if [ -z "$pr" ]; then
+            pr=$(echo "${{ github.ref_name }}" | sed -n 's#^review/pr-\([0-9]\+\)$#\1#p')
+          fi
+          round=$(echo "$path" | sed -n 's#.*round-\([0-9]\+\)/decisions/.*#\1#p')
+          if [ -z "$pr" ]; then
+            echo "could not determine the pull request from $path"; exit 1
+          fi
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "round=${round:-0}" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Apply the decision
+        if: steps.target.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prreview apply-decision \
+            --pr "${{ steps.target.outputs.pr }}" \
+            --round "${{ steps.target.outputs.round }}"
+
+  rereview:
+    # Runs after the author pushes fixes. Requires model credentials; if the
+    # repository has none configured this job no-ops and the author runs
+    # `prreview publish --pr <n>` locally instead.
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide whether credentials are available
+        id: creds
+        env:
+          ROLE: ${{ secrets.PRREVIEW_AWS_ROLE_ARN }}
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "${ROLE:-}" ]; then echo "mode=bedrock" >> "$GITHUB_OUTPUT"
+          elif [ -n "${KEY:-}" ]; then echo "mode=api_key" >> "$GITHUB_OUTPUT"
+          else echo "mode=none" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Skip notice
+        if: steps.creds.outputs.mode == 'none'
+        run: |
+          echo "No model credentials configured; skipping automatic re-review."
+          echo "The author can run: prreview publish --pr ${{ github.event.number }}"
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.mode != 'none'
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        if: steps.creds.outputs.mode != 'none'
+        with:
+          python-version: '3.11'
+
+      - name: Configure AWS credentials
+        if: steps.creds.outputs.mode == 'bedrock'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PRREVIEW_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.PRREVIEW_AWS_REGION || 'us-east-1' }}
+
+      - name: Install prreview
+        if: steps.creds.outputs.mode != 'none'
+        run: pip install --quiet 'prreview @ git+https://github.com/${{ github.repository_owner }}/pr-review-automation-agent@main'
+
+      - name: Write the runner's user config
+        if: steps.creds.outputs.mode != 'none'
+        run: |
+          mkdir -p ~/.prreview
+          cat > ~/.prreview/config.toml <<EOF
+          backend = "${{ steps.creds.outputs.mode }}"
+          aws_region = "${{ vars.PRREVIEW_AWS_REGION || 'us-east-1' }}"
+          github_login = "github-actions[bot]"
+          EOF
+
+      - name: Re-review and publish the next round
+        if: steps.creds.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: prreview publish --pr ${{ github.event.number }}

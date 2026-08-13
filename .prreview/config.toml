@@ -1,0 +1,98 @@
+# prreview repository config - committed, applies to everyone.
+#
+# Model and effort live here rather than in each person's config so that the
+# same commit yields the same review regardless of who runs it. Without that,
+# the accept/dismiss labels in data/review_agent/findings_labeled.jsonl are
+# not comparable across people.
+
+[context]
+# Injected into the reviewer agent's prompt. This is the only place project
+# knowledge belongs; the agent source stays domain-agnostic.
+project = """incident-digest reads a JSON list of incidents, ranks each one on a single severity ladder, has a model write a one-sentence summary, and prints the paragraph an on-call engineer reads in the morning (`src/digest/`, entry point `PYTHONPATH=src python -m digest.cli incidents.json`). It is small on purpose -- the README says it exists to exercise a code review agent end to end, so the seams matter more than the feature set: one vocabulary file, one severity ladder, one model call, and a CLI that wires them. The second half of the repository has nothing to do with the digest: `tools/traffic.py` and `deploy/traffic.yaml` send synthetic Bedrock traffic on a daily schedule so that a separate cost monitor has real, non-backfillable CloudWatch history to watch, including two deliberately anomalous kinds of day."""
+stakes = """Nothing depends on the digest itself. It has no on-call users, no deployment beyond a Dockerfile nobody is shown running, and a wrong ranking costs a wrong paragraph of text. Two things here are not free. The first is money: `llm.call` runs unattended twelve times a day on an EventBridge schedule against a real AWS account, so a change to prompt construction or to the model id multiplies a real bill by the batch size and by every day nobody checks. The stated figure is under two cents a month, and the only thing holding it there is that the prompt is short and the model is a 7B. The second is time: CloudWatch metrics in the `AWS/Bedrock` namespace are written by AWS and cannot be backfilled or faked, so traffic that stops, doubles, or changes shape does not merely lose a data point -- it moves the median that the cost monitor judges days against, and re-earning a clean baseline costs another week of waiting."""
+conventions = """The README section "Things that have to move together" is a maintained list, not prose: a change that creates a new cross-file coupling belongs in it. Comments in this codebase state cross-module contracts and are load-bearing rather than decorative -- `categories.py` on the Dockerfile, `severity.py` on `render.headline`, `deploy/traffic.yaml` on why `AWS_REGION` cannot be set there -- so a diff that changes behaviour must update the comment that names it. One has already drifted and is worth knowing about: `llm.py` says summaries get "truncated by the renderer anyway", but `render.line` does no truncation; it is `summarize.summarise` that keeps only the first line.
+
+New categories go in `config/categories.json` and are never special-cased in code -- `weight_of`'s own error message says so -- and the `version` field there is bumped with the list.
+
+Cost figures are stated as numbers on purpose, because "it's cheap" is how recurring spend gets approved without anybody knowing the figure. Changing the model, the region, or the call volume means updating `USD_PER_1K_IN`, `USD_PER_1K_OUT`, `PRICED_MODEL`, and the README's "about $0.0004 / under two cents" in the same change.
+
+Nothing runs the tests. `.github/workflows/traffic.yml` is the only workflow and it sends Bedrock traffic; `PYTHONPATH=src python -m pytest -q` is manual (10 tests, passing at 5fa8022). A change to `severity` or `render` has no automatic net under it, so a review cannot assume CI caught anything.
+
+There are no generated files to avoid hand-editing. `.prreview/cache/` is gitignored run state and holds the traffic log the launchd job appends to."""
+priorities = [
+  "`render.ALERT_FLOOR` and `severity.LADDER` must stay in sync and nothing checks that they do. `severity.at_least` catches `ValueError` and returns `False`, so a renamed rung or a typo in `ALERT_FLOOR` makes every incident fail to clear the floor and `headline` reports `nothing above high` over a page of outages -- it fails silent, in the direction of saying everything is fine. Watch the same boundary from the other side too: `severity.severity(1, 50_000)` is already `high`, so the affected-user count alone clears the floor, and the shipped `incidents.json` headline says `3 of 3` with a misaligned footer link among them. The tests pin only that these cases are not `critical`.",
+  "Model output is untrusted and reaches an unguarded index. `summarize.summarise` does `call(prompt).strip().splitlines()[0]`, so a completion that is empty or whitespace raises `IndexError` and takes down the entire digest rather than one line (verified: `summarise('t', 'b', call=lambda p: '   ')` raises). Any change to the model, to `llm.MAX_TOKENS`, or to the prompt makes an empty completion more likely, and the `collapse` mode in `tools/traffic.py` deliberately sends the bare-title prompt most likely to produce one.",
+  "Everything added to `summarize.PREAMBLE` or `build_prompt` is paid once per incident per run, unattended. Read a prompt-construction diff as a multiplication rather than an addition: `_LOG_NOISE` in `tools/traffic.py` exists to model exactly this bug -- roughly two thousand characters appended to every prompt because a retrieved-context block or an untrimmed history window crept in. A change here also invalidates what `python tools/traffic.py --dry-run` prints, which is the only place the cost is ever estimated before it is spent.",
+  "The model id lives in three places and no test compares them: `llm.MODEL_ID` (a default, overridable by `DIGEST_MODEL`), `traffic.PRICED_MODEL` alongside the `USD_PER_1K_IN`/`USD_PER_1K_OUT` rates it prices, and the `ModelId` parameter in `deploy/traffic.yaml`, which is both the Lambda's `DIGEST_MODEL` and the ARN the IAM policy scopes to. The guard in `traffic.main` compares only the first two, only at runtime, and `traffic.handler` does not run it at all -- so a Lambda batch can bill against a model whose rates nothing in the repository knows.",
+  "`TrafficRole` in `deploy/traffic.yaml` is the only credential in this repository that can spend money. It is scoped to `bedrock:InvokeModel` on a single interpolated foundation-model ARN plus log writes, and nothing else. Widening `Resource`, adding an action, or moving the model id out from under the `!Sub` interpolation are the changes worth reading twice; a mismatch between the ARN and `DIGEST_MODEL` fails closed with AccessDenied, which is the right way round and should stay that way.",
+  "The two EventBridge schedules must partition the week and nothing enforces it: `OrdinarySchedule` lists every day but THU, `AnomalySchedule` is THU. An overlap sends two batches into one UTC day, which the monitor reads as an anomaly rather than as a mistake. The same hazard exists one level up -- `traffic.plan_for` decides the anomalous day from the date (used by `main`, so by `run-daily.sh` and the GitHub Actions job), while `handler` takes `mode` from the event (used by Lambda). They are two independent definitions of which day is deliberately wrong, and having both schedulers enabled at once doubles the day's volume and drags the baseline onto it.",
+  "Failure here is meant to be loud, and three separate places say so deliberately: `llm.call` raises rather than returning nothing, `traffic.handler` raises when no call got through, `run-daily.sh` names the expired-SSO case rather than printing a traceback. A diff that wraps a model call in `try/except`, or falls back to `cli._offline` when the real call fails, produces a digest that looks complete and says nothing -- the precise failure mode this repository exists to illustrate. Treat any new swallowed exception on the model path as a finding regardless of how defensive it looks.",
+  "`config/categories.json` is the single vocabulary, and the two loaders disagree about unknown keys: `weight_of` raises `UnknownCategory` with an instruction to add the key to the file, while `label_of` raises a bare `KeyError` from inside `render.line`, after ranking has already succeeded. Changing that file is also a three-way move -- a weight feeds severity through `(weight - 1) // 2`, the Dockerfile bakes the file in at build time so a running container serves the vocabulary it was built with, and `_table` is `lru_cache`d so a long-lived process never rereads it.",
+]
+
+[review]
+branch      = "reviews"        # the single review-artifact branch, never merged
+layout      = "single-branch"  # needs the viewer ?path= patch; else branch-per-pr
+base_branch = "main"
+viewer_url  = "https://nunez-review-viewer.pages.dev"
+
+[reviewers]
+use_codeowners = true
+default = []
+
+[gate]
+blocking_severities = ["block", "major"]
+refute_min_rank = 3    # only tiers at or above this rank get adversarial checks
+refute_voters   = 3    # independent verifiers per finding, majority rules
+
+[cost]
+# Watching what this repository spends on models, day to day. Defaulted from
+# whether its source names a paid model at all, because that is readable and
+# asking would be asking for something already on disk. Turn it off here if
+# the calls are billed somewhere prreview cannot see.
+monitor = true
+days = 14          # baseline window
+tolerance = 0.5    # how far a call's size may drift before it is reported
+report_day = "mon" # a summary is posted then whether or not anything moved,
+                   # so that its absence is the alarm
+schedule = "0 13 * * *"
+
+[checks]
+run_local_tests = true
+
+[notify]
+email_via = "github"   # github (native notifications) | ses (branded, needs a key)
+
+# Model and effort per stage. A user config cannot override these.
+[stages.local_find]
+model = "opus"
+effort = "high"
+max_budget_usd = 3.0
+
+[stages.find]
+model = "opus"
+effort = "xhigh"
+max_budget_usd = 6.0
+
+[stages.impact]
+# What the change does to the rest of the system: callers, duplicated
+# invariants, data that must stay in sync, per-request cost, and what deploys.
+# Published reviews only -- the self review deliberately does not run it.
+model = "opus"
+effort = "xhigh"
+max_budget_usd = 6.0
+
+[stages.refute]
+model = "opus"
+effort = "medium"
+max_budget_usd = 0.6
+
+[stages.summarize]
+model = "sonnet"
+effort = "low"
+max_budget_usd = 0.5
+
+[stages.bootstrap]
+model = "opus"
+effort = "medium"
+max_budget_usd = 1.0
